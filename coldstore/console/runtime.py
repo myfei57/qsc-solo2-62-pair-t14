@@ -34,9 +34,9 @@ class Runtime:
         self.interlock = Interlock(store)
         self.cold_fans = cold_fans
         self.evap_fans = evap_fans
-        self.evap = Condenser(store, evap_fans)
-        self.defrost = Controller(cold_fans, rooms, store)
-        self.load = LoadCalculator(store)
         self.accumulator = Accumulator(store)
         self.auditor = Auditor(store)
+        self.evap = Condenser(store, evap_fans, self.auditor)
+        self.defrost = Controller(cold_fans, rooms, store)
+        self.load = LoadCalculator(store)
         self.scheduler = Scheduler(store)

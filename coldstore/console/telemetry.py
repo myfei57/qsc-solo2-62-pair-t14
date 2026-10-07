@@ -31,7 +31,13 @@ class Telemetry:
     cold_primary: str
     cold_running: int
     evap_temperature: float
+    evap_ambient: float
+    evap_baseline: float
     evap_above: bool
+    evap_status: str
+    evap_duty: str
+    evap_samples: int
+    evap_learned: bool
     defrost_warmups: int
     cooling_load: float
     quota_value: float
@@ -60,7 +66,13 @@ class Telemetry:
             "cold_primary": self.cold_primary,
             "cold_running": self.cold_running,
             "evap_temperature": self.evap_temperature,
+            "evap_ambient": self.evap_ambient,
+            "evap_baseline": self.evap_baseline,
             "evap_above": self.evap_above,
+            "evap_status": self.evap_status,
+            "evap_duty": self.evap_duty,
+            "evap_samples": self.evap_samples,
+            "evap_learned": self.evap_learned,
             "defrost_warmups": self.defrost_warmups,
             "cooling_load": self.cooling_load,
             "quota_value": self.quota_value,
@@ -74,6 +86,7 @@ def collect(rt: Runtime) -> Telemetry:
 
     temp = rt.temp.state()
     compressor_state = rt.compressors.state()
+    evap_state = rt.evap.state()
     return Telemetry(
         store_keys=rt.store.count(),
         rooms=rt.rooms.count(),
@@ -94,8 +107,14 @@ def collect(rt: Runtime) -> Telemetry:
         interlock_trips=rt.interlock.count(),
         cold_primary=rt.cold_fans.primary(),
         cold_running=len(rt.cold_fans.running_ids()),
-        evap_temperature=rt.evap.temperature(),
-        evap_above=rt.evap.above_baseline(),
+        evap_temperature=evap_state.temperature,
+        evap_ambient=evap_state.ambient,
+        evap_baseline=evap_state.baseline,
+        evap_above=evap_state.above_baseline,
+        evap_status=evap_state.status,
+        evap_duty=evap_state.duty,
+        evap_samples=evap_state.samples,
+        evap_learned=evap_state.learned,
         defrost_warmups=rt.defrost.warmup_count(),
         cooling_load=rt.load.total(rt.rooms),
         quota_value=rt.accumulator.value(),

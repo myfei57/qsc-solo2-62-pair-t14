@@ -88,6 +88,12 @@ def route_table() -> list[Route]:
         Route("GET", "/evap", "evaporative condenser state", "evap_state"),
         Route("POST", "/evap/baseline", "set the condenser temperature baseline", "evap_baseline"),
         Route("POST", "/evap/temp", "record the condenser temperature", "evap_temp"),
+        Route(
+            "POST",
+            "/evap/observe",
+            "rate limited condenser sample with adaptive baseline and duty control",
+            "evap_observe",
+        ),
         Route("POST", "/evap/switch", "switch the evaporative duty fan", "evap_switch"),
         Route("GET", "/defrost", "defrost queue and warm up state", "defrost_state"),
         Route("POST", "/defrost/start", "start a defrost sequence", "defrost_start"),

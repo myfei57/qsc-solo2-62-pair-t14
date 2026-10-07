@@ -258,6 +258,69 @@ class ConsoleCase(unittest.TestCase):
         status, body = self.call("POST", "/evap/switch", {"id": "e1"})
         self.assertEqual(body["duty"], "e1")
 
+    def test_adaptive_evap_observance_and_changeover(self) -> None:
+        self.call("POST", "/fan/add", {"id": "e1", "role": "primary", "group": "evap"})
+        self.call("POST", "/fan/add", {"id": "e2", "role": "standby", "group": "evap"})
+        self.call("POST", "/fan/start", {"id": "e1", "group": "evap"})
+
+        # Feed a healthy day whose condenser temperature tracks ambient with
+        # slope 0.4 and sits below the cold start anchor.
+        base = 1_790_000_000
+        for sample in range(28):
+            ambient = -5.0 + sample
+            temperature = 20.0 + 0.4 * ambient
+            status, body = self.call(
+                "POST",
+                "/evap/observe",
+                {"temperature": temperature, "ambient": ambient, "at": base + sample * 3600},
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(body["accepted"])
+        self.assertTrue(body["learned"])
+        self.assertAlmostEqual(body["slope"], 0.4, places=2)
+        self.assertEqual(body["status"], "normal")
+        self.assertEqual(body["duty"], "e1")
+
+        # Telemetry and the text report read the same baseline as state.
+        status, telemetry = self.call("GET", "/telemetry")
+        self.assertEqual(telemetry["evap_baseline"], body["baseline"])
+        self.assertEqual(telemetry["evap_duty"], "e1")
+        self.assertEqual(telemetry["evap_status"], "normal")
+        status, report = self.call("GET", "/report")
+        self.assertIn(f"baseline={body['baseline']:.4f}", report)
+
+        # A burst within the rate limit window is throttled out of learning.
+        status, burst = self.call(
+            "POST",
+            "/evap/observe",
+            {"temperature": 29.0, "ambient": 23.0, "at": base + 27 * 3600 + 5},
+        )
+        self.assertFalse(burst["accepted"])
+
+        # Two confirmed high excursions auto switch duty to the standby.
+        status, first = self.call(
+            "POST",
+            "/evap/observe",
+            {"temperature": 70.0, "ambient": 25.0, "at": base + 200_000},
+        )
+        self.assertEqual(first["status"], "high")
+        self.assertEqual(first["duty"], "e1")
+        status, second = self.call(
+            "POST",
+            "/evap/observe",
+            {"temperature": 71.0, "ambient": 25.0, "at": base + 300_000},
+        )
+        self.assertEqual(second["status"], "high")
+        self.assertEqual(second["duty"], "e2")
+
+        # The audit list carries the baseline, verdict and duty decisions.
+        status, audit = self.call("GET", "/audit/summary")
+        for kind in ("evap_baseline", "evap_verdict", "evap_duty"):
+            self.assertIn(kind, audit["by_kind"])
+        status, telemetry = self.call("GET", "/telemetry")
+        self.assertEqual(telemetry["evap_duty"], "e2")
+        self.assertEqual(telemetry["evap_status"], "high")
+
     def test_defrost_routes(self) -> None:
         self.add_room("r1", 1, -10.0)
         self.add_room("r2", 2, -12.0)

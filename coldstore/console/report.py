@@ -53,7 +53,11 @@ def text_report(rt: Runtime) -> str:
         ),
         (
             f"evap temperature={telemetry.evap_temperature:.4f} "
-            f"above={telemetry.evap_above} duty={rt.evap.duty() or ''}"
+            f"ambient={telemetry.evap_ambient:.4f} "
+            f"baseline={telemetry.evap_baseline:.4f} "
+            f"status={telemetry.evap_status} above={telemetry.evap_above} "
+            f"duty={telemetry.evap_duty or ''} samples={telemetry.evap_samples} "
+            f"learned={telemetry.evap_learned}"
         ),
         f"cooling load={telemetry.cooling_load:.4f} due={telemetry.schedule_due}",
         f"quota value={telemetry.quota_value:.4f} open valves={telemetry.supply_open}",

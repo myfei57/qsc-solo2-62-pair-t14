@@ -463,6 +463,18 @@ def evap_temp(server: "Server", request: Request) -> Response:
     return json_response({"temperature": value, "above_baseline": condenser.above_baseline()})
 
 
+def evap_observe(server: "Server", request: Request) -> Response:
+    """High frequency condenser feed: rate limited learning and duty control."""
+
+    temperature = request.float_field("temperature")
+    ambient = request.float_field("ambient")
+    at = request.int_field("at", 0)
+    validate_baseline(temperature)
+    validate_baseline(ambient)
+    state = server.runtime.evap.observe(temperature, ambient, at=at or None)
+    return json_response(state.as_dict())
+
+
 def evap_switch(server: "Server", request: Request) -> Response:
     return json_response({"duty": server.runtime.evap.switch_to_standby(request.str_field("id"))})
 

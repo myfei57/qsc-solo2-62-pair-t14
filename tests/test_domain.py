@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 
@@ -262,6 +263,122 @@ class CondenserCase(unittest.TestCase):
             validate_evap_baseline(-200.0)
         with self.assertRaises(ValueError):
             validate_evap_baseline(200.0)
+
+    def test_rate_limiting_guards_baseline_feed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            condenser = Condenser(store, FanSet())
+            first = condenser.observe(30.0, 20.0, at=1000)
+            self.assertTrue(first.accepted)
+            burst = condenser.observe(99.0, 60.0, at=1005)
+            self.assertFalse(burst.accepted)
+            # The burst value must not have trained the baseline.
+            self.assertEqual(condenser.ambient(), 20.0)
+            later = condenser.observe(31.0, 21.0, at=2000)
+            self.assertTrue(later.accepted)
+            self.assertEqual(condenser.ambient(), 21.0)
+
+    def test_daily_regression_corrects_for_ambient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            tracker = Condenser(store, FanSet()).tracker()
+            # Healthy condenser follows ambient: temperature = 30 + 0.4 * ambient
+            # sampled hourly. The first 24 samples prime every daily bucket;
+            # later samples slide the window without growing it.
+            for sample in range(28):
+                ambient = -10.0 + sample
+                temperature = 30.0 + 0.4 * ambient
+                accepted, _ = tracker.observe(ambient, temperature, at=sample * 3600)
+                self.assertTrue(accepted)
+                self.assertLessEqual(tracker.sample_count(), 24)
+            self.assertTrue(tracker.learned())
+            self.assertEqual(tracker.covered_buckets(), 24)
+            self.assertAlmostEqual(tracker.slope(), 0.4, places=2)
+            # anchor is the fitted value at the 25 C reference: 30 + 0.4*25 = 40
+            self.assertAlmostEqual(tracker.anchor(), 40.0, places=1)
+            winter = tracker.baseline_for(0.0)
+            summer = tracker.baseline_for(40.0)
+            self.assertLess(winter, summer)
+            self.assertAlmostEqual(summer - winter, 0.4 * 40.0, places=1)
+
+    def test_high_readings_freeze_learning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            fans = FanSet()
+            fans.add_fan("e1", PRIMARY)
+            fans.add_fan("e2", STANDBY)
+            fans.start("e1")
+            condenser = Condenser(store, fans)
+            condenser.set_temperature(32.0)
+            before = condenser.baseline()
+            state = condenser.observe(80.0, 25.0, at=5000)
+            self.assertFalse(state.accepted)
+            self.assertEqual(state.status, "high")
+            self.assertEqual(condenser.ambient(), 0.0)
+            self.assertEqual(condenser.baseline(), before)
+
+    def test_confirmed_excursion_switches_to_standby(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            fans = FanSet()
+            fans.add_fan("e1", PRIMARY)
+            fans.add_fan("e2", STANDBY)
+            fans.start("e1")
+            auditor = Auditor(store)
+            condenser = Condenser(store, fans, auditor)
+            # First high sample announces the verdict but does not switch.
+            first = condenser.observe(60.0, 25.0, at=10_000)
+            self.assertEqual(first.status, "high")
+            self.assertEqual(condenser.duty(), "e1")
+            # The second rate limited high sample confirms and changes duty.
+            second = condenser.observe(61.0, 25.0, at=20_000)
+            self.assertEqual(second.status, "high")
+            self.assertEqual(condenser.duty(), "e2")
+            kinds = auditor.count_by_kind()
+            self.assertIn("evap_verdict", kinds)
+            self.assertIn("evap_duty", kinds)
+            switch_entries = auditor.filter("evap_duty")
+            payload = json.loads(switch_entries[-1].detail)
+            self.assertEqual(payload["action"], "auto_switch")
+            self.assertEqual(payload["to"], "e2")
+            # A single excursion episode switches at most once.
+            condenser.observe(62.0, 25.0, at=30_000)
+            self.assertEqual(len(auditor.filter("evap_duty")), 1)
+
+    def test_excursion_without_standby_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            fans = FanSet()
+            fans.add_fan("e1", PRIMARY)
+            fans.add_fan("e2", STANDBY)
+            fans.fail("e2")
+            fans.start("e1")
+            auditor = Auditor(store)
+            condenser = Condenser(store, fans, auditor)
+            condenser.observe(60.0, 25.0, at=10_000)
+            condenser.observe(61.0, 25.0, at=20_000)
+            self.assertEqual(condenser.duty(), "e1")
+            payload = json.loads(auditor.filter("evap_duty")[-1].detail)
+            self.assertEqual(payload["action"], "switch_unavailable")
+
+    def test_audit_and_telemetry_share_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store.open(f"{tmp}/state.json")
+            auditor = Auditor(store)
+            condenser = Condenser(store, FanSet(), auditor)
+            condenser.observe(30.0, 10.0, at=40_000)
+            baseline = condenser.baseline()
+            entries = [json.loads(entry.detail) for entry in auditor.filter("evap_baseline")]
+            self.assertTrue(entries)
+            self.assertEqual(entries[-1]["baseline"], round(baseline, 4))
+            condenser.set_baseline(28.0)
+            manual = [
+                json.loads(entry.detail)
+                for entry in auditor.filter("evap_baseline")
+                if json.loads(entry.detail)["source"] == "manual"
+            ]
+            self.assertEqual(manual[-1]["anchor"], 28.0)
+            self.assertEqual(condenser.tracker().sample_count(), 0)
 
 
 class DefrostCase(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,16 @@ class CondenserState:
     baseline: float
     above_baseline: bool
     duty: str
+    ambient: float = 0.0
+    status: str = "normal"
+    verdict: str = "ok"
+    baseline_quality: str = "cold"
+    threshold: float = 0.0
+    residual: float = 0.0
+    accepted: int = 0
+    rejected: int = 0
+    basis: str = "manual"
+    detail: dict[str, object] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -20,6 +30,16 @@ class CondenserState:
             "baseline": self.baseline,
             "above_baseline": self.above_baseline,
             "duty": self.duty,
+            "ambient": self.ambient,
+            "status": self.status,
+            "verdict": self.verdict,
+            "baseline_quality": self.baseline_quality,
+            "threshold": self.threshold,
+            "residual": self.residual,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "basis": self.basis,
+            "detail": self.detail,
         }
 
 

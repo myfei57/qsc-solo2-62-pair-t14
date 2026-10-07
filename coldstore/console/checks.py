@@ -43,10 +43,25 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
     else:
         checks.append({"name": "fans", "status": "warn", "detail": "no fan running"})
 
-    if rt.evap.temperature() > rt.evap.baseline():
-        checks.append({"name": "evap", "status": "warn", "detail": "above baseline"})
+    evap_state = rt.evap.state()
+    if evap_state.status == "fault":
+        checks.append({"name": "evap", "status": "fail", "detail": "sensor fault, fail safe active"})
+    elif evap_state.status == "over":
+        checks.append({"name": "evap", "status": "fail", "detail": f"{evap_state.verdict}, standby online"})
+    elif evap_state.status == "warn":
+        checks.append({"name": "evap", "status": "warn", "detail": "above warning margin"})
+    elif evap_state.baseline_quality in ("cold", "bad"):
+        checks.append(
+            {"name": "evap", "status": "warn", "detail": f"baseline {evap_state.baseline_quality}, fallback in use"}
+        )
     else:
-        checks.append({"name": "evap", "status": "ok", "detail": "at or below baseline"})
+        checks.append(
+            {
+                "name": "evap",
+                "status": "ok",
+                "detail": f"at or below baseline ({evap_state.baseline_quality})",
+            }
+        )
 
     unassigned = rt.rooms.unassigned()
     if rt.rooms.count() == 0:

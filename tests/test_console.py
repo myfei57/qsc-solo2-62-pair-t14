@@ -450,6 +450,128 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("non-negative", error["error"])
 
+    def test_adaptive_evap_sample_over_limit_audit_and_report(self) -> None:
+        self.call("POST", "/fan/add", {"id": "e1", "role": "primary", "group": "evap"})
+        self.call("POST", "/fan/add", {"id": "e2", "role": "standby", "group": "evap"})
+        self.call("POST", "/fan/start", {"id": "e1", "group": "evap"})
+
+        # fast learning for the test
+        _, config = self.call("GET", "/evap/config")
+        self.assertEqual(config["sliding"], "hourly")
+        self.call(
+            "POST",
+            "/evap/config",
+            {
+                "halflife_hours": 1.0,
+                "n_full": 4.0,
+                "warmup_samples": 2.0,
+                "min_interval": 1.0,
+                "over_debounce": 3,
+                "warn_margin": 2.0,
+                "over_margin": 4.0,
+                "stale_seconds": 3600,
+                "temp_slope_max": 5.0,
+            },
+        )
+
+        # high frequency burst: only the first two within the second are kept
+        status, first = self.call(
+            "POST", "/evap/sample", {"at": 0, "ambient": 25.0, "temperature": 30.0}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(first["accepted"])
+        status, throttled = self.call(
+            "POST", "/evap/sample", {"at": 0.1, "ambient": 25.0, "temperature": 30.0}
+        )
+        self.assertFalse(throttled["accepted"])
+        self.assertEqual(throttled["reason"], "rate-limited")
+
+        # train the summer bin (one accepted steady sample per second)
+        for second in range(1, 14):
+            self.call(
+                "POST",
+                "/evap/sample",
+                {"at": second, "ambient": 25.0, "temperature": 30.05},
+            )
+
+        status, state = self.call("GET", "/evap")
+        self.assertEqual(status, 200)
+        self.assertEqual(state["basis"], "learned")
+        self.assertAlmostEqual(state["baseline"], 30.05, delta=0.4)
+        self.assertEqual(state["status"], "normal")
+
+        # a quiet, statistically wild point is rejected as a spike and
+        # cannot train; keep it below the over-limit threshold so this
+        # assertion isolates the spike gate
+        status, spike = self.call(
+            "POST", "/evap/sample", {"at": 14, "ambient": 25.0, "temperature": 32.0}
+        )
+        self.assertFalse(spike["accepted"])
+        self.assertEqual(spike["reason"], "spike")
+        self.assertAlmostEqual(spike["baseline"], 30.05, delta=0.1)
+
+        # sustained excursion: standby is brought online and the trip is audited
+        for second in range(15, 19):
+            status, over = self.call(
+                "POST",
+                "/evap/sample",
+                {"at": second, "ambient": 25.0, "temperature": 35.0},
+            )
+        self.assertEqual(over["status"], "over")
+        self.assertEqual(over["command"], "parallel:e2")
+        status, fans = self.call("GET", "/fan", {"group": "evap"})
+        running = sorted(f["id"] for f in fans["fans"] if f["running"])
+        self.assertEqual(running, ["e1", "e2"])
+
+        # recovery promotes the standby and stops the old duty fan
+        status, recovered = self.call(
+            "POST", "/evap/sample", {"at": 30, "ambient": 25.0, "temperature": 31.0}
+        )
+        self.assertEqual(recovered["command"], "promote:e2")
+        status, fans = self.call("GET", "/fan", {"group": "evap"})
+        self.assertEqual([f["id"] for f in fans["fans"] if f["running"]], ["e2"])
+
+        # hourly tick records the audit snapshot
+        status, tick = self.call("POST", "/evap/tick", {"at": 3630})
+        self.assertEqual(tick["sliding"], "hourly")
+        self.assertEqual(tick["status"], "warn")
+
+        # audit trail, telemetry and text report all quote the same baseline
+        status, summary = self.call("GET", "/audit/summary")
+        kinds = summary["by_kind"]
+        self.assertIn("evap.alarm", kinds)
+        self.assertIn("evap.baseline-hour", kinds)
+        status, audit = self.call("POST", "/audit/filter", {"kind": "evap.baseline-hour"})
+        logged = json.loads(audit["entries"][-1]["detail"])
+        status, telemetry = self.call("GET", "/telemetry")
+        self.assertAlmostEqual(logged["baseline"], telemetry["evap_baseline"], places=4)
+        self.assertEqual(logged["status"], telemetry["evap_status"])
+        self.assertEqual(telemetry["evap_duty"], "e2")
+        status, report = self.call("GET", "/report")
+        self.assertIn(f"baseline={telemetry['evap_baseline']:.4f}", report)
+        self.assertIn("verdict=warning", report)
+
+        # CSV telemetry export carries the same figures
+        status, csv_text = self.call("GET", "/export/telemetry")
+        self.assertIn("evap_baseline,", csv_text)
+
+    def test_adaptive_evap_sensor_fault_fail_safe(self) -> None:
+        self.call("POST", "/fan/add", {"id": "e1", "role": "primary", "group": "evap"})
+        self.call("POST", "/fan/add", {"id": "e2", "role": "standby", "group": "evap"})
+        self.call("POST", "/fan/start", {"id": "e1", "group": "evap"})
+        self.call(
+            "POST",
+            "/evap/sample",
+            {"at": 1000, "ambient": 25.0, "temperature": 30.0},
+        )
+        status, tick = self.call("POST", "/evap/tick", {"at": 2000})
+        self.assertEqual(status, 200)
+        self.assertIn("sensor-fault", tick["alarms"])
+        self.assertIn("failsafe:e2", tick["actions"])
+        status, checks = self.call("GET", "/health/checks")
+        evap_check = next(row for row in checks["checks"] if row["name"] == "evap")
+        self.assertEqual(evap_check["status"], "fail")
+
 
 class WsgiCase(unittest.TestCase):
     def test_wsgi_entry_point(self) -> None:
@@ -480,6 +602,7 @@ class WsgiCase(unittest.TestCase):
             self.assertEqual(captured["status"], "200 OK")
             self.assertEqual(json.loads(body)["value"], -12.0)
             store.close()
+
 
 
 if __name__ == "__main__":

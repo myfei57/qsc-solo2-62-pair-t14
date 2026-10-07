@@ -32,6 +32,18 @@ class Telemetry:
     cold_running: int
     evap_temperature: float
     evap_above: bool
+    evap_ambient: float
+    evap_baseline: float
+    evap_baseline_quality: str
+    evap_baseline_basis: str
+    evap_threshold: float
+    evap_residual: float
+    evap_status: str
+    evap_verdict: str
+    evap_duty: str
+    evap_running: int
+    evap_accepted: int
+    evap_rejected: int
     defrost_warmups: int
     cooling_load: float
     quota_value: float
@@ -61,6 +73,18 @@ class Telemetry:
             "cold_running": self.cold_running,
             "evap_temperature": self.evap_temperature,
             "evap_above": self.evap_above,
+            "evap_ambient": self.evap_ambient,
+            "evap_baseline": self.evap_baseline,
+            "evap_baseline_quality": self.evap_baseline_quality,
+            "evap_baseline_basis": self.evap_baseline_basis,
+            "evap_threshold": self.evap_threshold,
+            "evap_residual": self.evap_residual,
+            "evap_status": self.evap_status,
+            "evap_verdict": self.evap_verdict,
+            "evap_duty": self.evap_duty,
+            "evap_running": self.evap_running,
+            "evap_accepted": self.evap_accepted,
+            "evap_rejected": self.evap_rejected,
             "defrost_warmups": self.defrost_warmups,
             "cooling_load": self.cooling_load,
             "quota_value": self.quota_value,
@@ -74,6 +98,7 @@ def collect(rt: Runtime) -> Telemetry:
 
     temp = rt.temp.state()
     compressor_state = rt.compressors.state()
+    evap = rt.evap.state()
     return Telemetry(
         store_keys=rt.store.count(),
         rooms=rt.rooms.count(),
@@ -94,8 +119,20 @@ def collect(rt: Runtime) -> Telemetry:
         interlock_trips=rt.interlock.count(),
         cold_primary=rt.cold_fans.primary(),
         cold_running=len(rt.cold_fans.running_ids()),
-        evap_temperature=rt.evap.temperature(),
-        evap_above=rt.evap.above_baseline(),
+        evap_temperature=evap.temperature,
+        evap_above=evap.above_baseline,
+        evap_ambient=evap.ambient,
+        evap_baseline=evap.baseline,
+        evap_baseline_quality=evap.baseline_quality,
+        evap_baseline_basis=evap.basis,
+        evap_threshold=evap.threshold,
+        evap_residual=evap.residual,
+        evap_status=evap.status,
+        evap_verdict=evap.verdict,
+        evap_duty=evap.duty,
+        evap_running=len(rt.evap.controller.running_ids()),
+        evap_accepted=evap.accepted,
+        evap_rejected=evap.rejected,
         defrost_warmups=rt.defrost.warmup_count(),
         cooling_load=rt.load.total(rt.rooms),
         quota_value=rt.accumulator.value(),

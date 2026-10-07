@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import json
+import time
+
 from coldstore.ammonia import validate_ppm, validate_threshold
 from coldstore.comp import validate_stage
 from coldstore.evap import validate_baseline
@@ -449,10 +452,116 @@ def evap_state(server: "Server", request: Request) -> Response:
     return json_response(server.runtime.evap.state().as_dict())
 
 
+def evap_sample(server: "Server", request: Request) -> Response:
+    """Feed one rate limited sample and get baseline, verdict and action."""
+
+    ambient = request.float_field("ambient")
+    temperature = request.float_field("temperature")
+    at = request.float_field("at", float(time.time()))
+    fan_level = request.int_field("fan_level", 1)
+    condenser = server.runtime.evap
+    result = condenser.controller.sample(at, ambient, temperature, fan_level)
+
+    # Audit control relevant outcomes regardless of whether the sample was
+    # admitted for learning: an excursion point is typically a rejected spike
+    # but it still has to be in the trail with the fan response it caused.
+    if result.command != "none" or result.alarms or result.status == "over":
+        detail = {
+            "ambient": round(result.ambient, 4),
+            "temperature": round(result.temperature, 4),
+            "baseline": round(result.baseline, 4),
+            "baseline_quality": result.quality,
+            "status": result.status,
+            "verdict": result.verdict,
+            "duty": result.duty,
+            "running": condenser.controller.running_ids(),
+            "command": result.command,
+            "alarms": list(result.alarms),
+            "residual": round(result.residual, 4),
+        }
+        kind = "evap.alarm" if result.alarms else "evap.command"
+        server.runtime.auditor.record(kind, json.dumps(detail, ensure_ascii=False))
+
+    return json_response(result.as_dict())
+
+
+def evap_tick(server: "Server", request: Request) -> Response:
+    """Hourly sliding tick: staleness failsafe, weekly rotation, audit shot."""
+
+    at = request.float_field("at", float(time.time()))
+    condenser = server.runtime.evap
+    tick_result = condenser.controller.tick(at)
+    state = condenser.state()
+    snapshot = {
+        "at": at,
+        "sliding": "hourly",
+        "baseline": round(state.baseline, 4),
+        "baseline_quality": state.baseline_quality,
+        "basis": state.basis,
+        "ambient": round(state.ambient, 4),
+        "temperature": round(state.temperature, 4),
+        "threshold": round(state.threshold, 4),
+        "residual": round(state.residual, 4),
+        "status": state.status,
+        "verdict": state.verdict,
+        "duty": state.duty,
+        "running": condenser.controller.running_ids(),
+        "accepted": state.accepted,
+        "rejected": state.rejected,
+        "actions": tick_result["actions"],
+        "alarms": tick_result["alarms"],
+    }
+    server.runtime.auditor.record("evap.baseline-hour", json.dumps(snapshot, ensure_ascii=False))
+    return json_response(snapshot)
+
+
+def evap_config_get(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.evap.controller.config().as_dict())
+
+
+def evap_config_set(server: "Server", request: Request) -> Response:
+    integer_fields = {
+        "over_debounce",
+        "over_alarm_after",
+        "stale_seconds",
+        "overlap_seconds",
+        "rotate_interval",
+    }
+    changes: dict[str, object] = {}
+    for key, value in request.payload.items():
+        if key == "burst":
+            changes[key] = float(value)
+        elif key in integer_fields:
+            changes[key] = int(float(value))
+        else:
+            changes[key] = float(value)
+    config = server.runtime.evap.controller.set_config(changes)
+    server.runtime.auditor.record("evap.config", json.dumps(config.as_dict()))
+    return json_response(config.as_dict())
+
+
+def evap_fault_clear(server: "Server", request: Request) -> Response:
+    at = request.float_field("at", float(time.time()))
+    outcome = server.runtime.evap.controller.clear_fault(at)
+    server.runtime.auditor.record("evap.fault-clear", outcome)
+    return json_response({"outcome": outcome, "status": server.runtime.evap.controller.status()})
+
+
 def evap_baseline(server: "Server", request: Request) -> Response:
     value = request.float_field("baseline")
     validate_baseline(value)
-    return json_response({"baseline": server.runtime.evap.set_baseline(value)})
+    stored = server.runtime.evap.set_baseline(value)
+    server.runtime.auditor.record(
+        "evap.baseline-manual",
+        json.dumps({"fallback": stored, "served": server.runtime.evap.baseline()}),
+    )
+    return json_response(
+        {
+            "baseline": stored,
+            "served_baseline": server.runtime.evap.baseline(),
+            "basis": server.runtime.evap.state().basis,
+        }
+    )
 
 
 def evap_temp(server: "Server", request: Request) -> Response:
@@ -460,11 +569,24 @@ def evap_temp(server: "Server", request: Request) -> Response:
     validate_baseline(value)
     condenser = server.runtime.evap
     condenser.set_temperature(value)
-    return json_response({"temperature": value, "above_baseline": condenser.above_baseline()})
+    return json_response(
+        {
+            "temperature": value,
+            "above_baseline": condenser.state().status
+            in ("warn", "over"),
+            "baseline": condenser.baseline(),
+        }
+    )
 
 
 def evap_switch(server: "Server", request: Request) -> Response:
-    return json_response({"duty": server.runtime.evap.switch_to_standby(request.str_field("id"))})
+    fan_id = request.str_field("id")
+    duty = server.runtime.evap.switch_to_standby(fan_id)
+    server.runtime.auditor.record(
+        "evap.switch",
+        json.dumps({"duty": duty, "running": server.runtime.evap.controller.running_ids()}),
+    )
+    return json_response({"duty": duty, "running": server.runtime.evap.controller.running_ids()})
 
 
 def defrost_state(server: "Server", request: Request) -> Response:
